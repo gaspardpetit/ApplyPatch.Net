@@ -1,11 +1,11 @@
 <Project>
   <PropertyGroup Condition="'$(IsPackable)' != 'false'">
-    <Company>V4A</Company>
+    <Company>ApplyPatch</Company>
     <Authors>Gaspard Petit</Authors>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
-    <PackageProjectUrl>https://github.com/gaspardpetit/V4A.Net</PackageProjectUrl>
-    <RepositoryUrl>https://github.com/gaspardpetit/V4A.Net</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/gaspardpetit/ApplyPatch.Net</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/gaspardpetit/ApplyPatch.Net</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
     <IncludeSymbols>true</IncludeSymbols>

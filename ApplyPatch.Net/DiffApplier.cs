@@ -2,7 +2,7 @@
 
 using System.Text.RegularExpressions;
 
-namespace V4A;
+namespace ApplyPatch;
 
 public static class DiffApplier
 {

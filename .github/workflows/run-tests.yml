@@ -26,10 +26,10 @@ jobs:
           dotnet-version: 8.0.x
 
       - name: Restore
-        run: dotnet restore V4A.Net.sln
+        run: dotnet restore ApplyPatch.Net.sln
 
       - name: Build
-        run: dotnet build V4A.Net.sln --configuration Release --no-restore -p:GeneratePackageOnBuild=false
+        run: dotnet build ApplyPatch.Net.sln --configuration Release --no-restore -p:GeneratePackageOnBuild=false
 
       - name: Test
-        run: dotnet test V4A.Net.sln --configuration Release --no-build --logger "trx;LogFileName=tests.trx"
+        run: dotnet test ApplyPatch.Net.sln --configuration Release --no-build --logger "trx;LogFileName=tests.trx"
