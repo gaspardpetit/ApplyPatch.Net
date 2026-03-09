@@ -1,4 +1,4 @@
-﻿namespace V4A.Tests;
+﻿namespace ApplyPatch.Tests;
 
 public class ApplyDiffInternalTests
 {

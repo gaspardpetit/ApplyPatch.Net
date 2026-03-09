@@ -6,9 +6,9 @@
 		<Nullable>enable</Nullable>
 		<LangVersion>latest</LangVersion>
 		<GeneratePackageOnBuild>true</GeneratePackageOnBuild>
-		<PackageId>V4A</PackageId>
-		<Description>Applies V4A diff patches as used by the apply_patch OpenAI tool</Description>
-		<RootNamespace>V4A</RootNamespace>
+		<PackageId>ApplyPatch</PackageId>
+		<Description>Applies V4A style diff patches as used by the apply_patch OpenAI tool</Description>
+		<RootNamespace>ApplyPatch</RootNamespace>
 		<PackageLicenseExpression>MIT</PackageLicenseExpression>
 	</PropertyGroup>
 

@@ -54,13 +54,13 @@ jobs:
           dotnet-version: 8.0.x
 
       - name: Restore
-        run: dotnet restore V4A.Net.sln
+        run: dotnet restore ApplyPatch.Net.sln
 
       - name: Build
-        run: dotnet build V4A.Net.sln --configuration Release --no-restore -p:Version=${{ steps.version.outputs.version }} -p:GeneratePackageOnBuild=false
+        run: dotnet build ApplyPatch.Net.sln --configuration Release --no-restore -p:Version=${{ steps.version.outputs.version }} -p:GeneratePackageOnBuild=false
 
       - name: Pack
-        run: dotnet pack V4A.Net.sln --configuration Release --no-build -p:Version=${{ steps.version.outputs.version }} -o artifacts/packages
+        run: dotnet pack ApplyPatch.Net.sln --configuration Release --no-build -p:Version=${{ steps.version.outputs.version }} -o artifacts/packages
 
       - name: Push packages to NuGet
         env:
