@@ -1,7 +1,7 @@
 [![Build & Tests](https://github.com/gaspardpetit/V4A.Net/actions/workflows/run-tests.yml/badge.svg)](https://github.com/gaspardpetit/V4A.Net/actions/workflows/run-tests.yml)
 ![NuGet Version](https://img.shields.io/nuget/v/V4A)
 
-# V4A.Net
+# ApplyPatch.Net
 
 A .NET library for applying **V4A diffs** (the patch format used by OpenAI’s `apply-patch` tool) to text files.
 
