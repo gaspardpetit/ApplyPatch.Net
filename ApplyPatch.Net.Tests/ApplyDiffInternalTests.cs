@@ -23,16 +23,33 @@ public class ApplyDiffInternalTests
 	}
 
 	[Fact]
-	public void ReadStr_ReturnsEmptyWhenMissingPrefix()
+	public void TryReadAnchor_ReturnsNullWhenMissingPrefix()
 	{
 		var state = new DiffApplier.ParserState(new List<string> { "value" }) {
 			Index = 0
 		};
 
-		var result = DiffApplier.ReadStr(state, "nomatch");
+		var result = DiffApplier.TryReadAnchor(state);
 
-		Assert.Equal(string.Empty, result);
+		Assert.Null(result);
 		Assert.Equal(0, state.Index);
+	}
+
+	[Fact]
+	public void TryReadAnchor_ParsesPrefixAnchors()
+	{
+		var startsWithState = new DiffApplier.ParserState(new List<string> { "@@^prefix" });
+		var endsWithState = new DiffApplier.ParserState(new List<string> { "@@$suffix" });
+
+		var startsWith = DiffApplier.TryReadAnchor(startsWithState);
+		var endsWith = DiffApplier.TryReadAnchor(endsWithState);
+
+		Assert.NotNull(startsWith);
+		Assert.Equal(DiffApplier.AnchorMatchKind.StartsWith, startsWith!.Kind);
+		Assert.Equal("prefix", startsWith.Text);
+		Assert.NotNull(endsWith);
+		Assert.Equal(DiffApplier.AnchorMatchKind.EndsWith, endsWith!.Kind);
+		Assert.Equal("suffix", endsWith.Text);
 	}
 
 	[Fact]
@@ -68,7 +85,10 @@ public class ApplyDiffInternalTests
 	{
 		var match = DiffApplier.FindContext(
 			new List<string> { "one" },
-			new List<string> { "missing" },
+			new List<DiffApplier.ContextLine>
+			{
+				new(DiffApplier.ContextMatchKind.Exact, "missing")
+			},
 			start: 0,
 			eof: true);
 
@@ -81,7 +101,10 @@ public class ApplyDiffInternalTests
 	{
 		var match = DiffApplier.FindContextCore(
 			new List<string> { " line " },
-			new List<string> { "line" },
+			new List<DiffApplier.ContextLine>
+			{
+				new(DiffApplier.ContextMatchKind.Exact, "line")
+			},
 			start: 0);
 
 		Assert.Equal(0, match.NewIndex);
@@ -89,9 +112,20 @@ public class ApplyDiffInternalTests
 	}
 
 	[Fact]
+	public void ParseContextLine_RecognizesPrefixMarkers()
+	{
+		var startsWith = DiffApplier.ParseContextLine('^', "prefix");
+		var endsWith = DiffApplier.ParseContextLine('$', "suffix");
+
+		Assert.Equal(DiffApplier.ContextMatchKind.StartsWith, startsWith.Kind);
+		Assert.Equal("prefix", startsWith.Text);
+		Assert.Equal(DiffApplier.ContextMatchKind.EndsWith, endsWith.Kind);
+		Assert.Equal("suffix", endsWith.Text);
+	}
+
+	[Fact]
 	public void ApplyChunks_RejectsBadChunks()
 	{
-		// Chunk(orig_index=10, del_lines=[], ins_lines=[])
 		Assert.Throws<InvalidOperationException>(() =>
 			DiffApplier.ApplyChunks(
 				"abc",
@@ -101,9 +135,8 @@ public class ApplyDiffInternalTests
 						OrigIndex: 10,
 						DelLines: new List<string>(),
 						InsLines: new List<string>())
-				}));
-
-		// overlapping chunks
+				},
+				"\n"));
 		Assert.Throws<InvalidOperationException>(() =>
 			DiffApplier.ApplyChunks(
 				"abc",
@@ -117,6 +150,7 @@ public class ApplyDiffInternalTests
 						OrigIndex: 0,
 						DelLines: new List<string> { "b" },
 						InsLines: new List<string>())
-				}));
+				},
+				"\n"));
 	}
 }
