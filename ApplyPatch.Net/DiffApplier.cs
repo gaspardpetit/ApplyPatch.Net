@@ -1,4 +1,18 @@
-﻿// ported from https://github.com/openai/openai-agents-python
+﻿//-----------------------------------------------------------------
+// PORT HISTORY
+// 2025-11-13 - Add new tools for gpt-5.1
+//              https://github.com/openai/openai-agents-python/pull/2079
+// 2026-03-10 - fix: emit tracing function spans for shell/apply_patch/computer runtime tools
+//              https://github.com/openai/openai-agents-python/pull/2498
+// 2026-03-12
+//  The following changes are now officially supported by the apply_patch as
+//  provided by OpenAI, however, for models that are not trained with apply_patch
+//  they are useful - especially those struggling to reproduce a perfect line when it is
+//  long. These are optional and can be provided in instructions, but do not interfer with
+//  the core functionality of the apply_patch tool.
+//	- Added support for Set File (aliases Add File)
+//	- Added support for hunk prefix anchors: ^ (starts with) and $ (ends with)
+//-----------------------------------------------------------------
 
 using System.Text.RegularExpressions;
 
@@ -20,7 +34,8 @@ public static class DiffApplier
 		END_PATCH,
 		"*** Update File:",
 		"*** Delete File:",
-		"*** Add File:"
+		"*** Add File:",
+		"*** Set File:"
 	};
 
 	private static readonly string[] END_SECTION_MARKERS =
@@ -29,10 +44,21 @@ public static class DiffApplier
 		"*** Update File:",
 		"*** Delete File:",
 		"*** Add File:",
+		"*** Set File:",
 		END_FILE
 	};
 
-	// ---------- Data structures ----------
+	public enum ContextMatchKind
+	{
+		Exact,
+		StartsWith,
+		EndsWith
+	}
+
+	public sealed record ContextLine(
+		ContextMatchKind Kind,
+		string Text
+	);
 
 	public sealed record Chunk(
 		int OrigIndex,
@@ -42,7 +68,7 @@ public static class DiffApplier
 
 	internal sealed class ParserState
 	{
-		public List<string> Lines { get; }
+		public List<string> Lines { get; private set; }
 		public int Index { get; set; }
 		public int Fuzz { get; set; }
 
@@ -60,7 +86,7 @@ public static class DiffApplier
 	);
 
 	internal sealed record ReadSectionResult(
-		List<string> NextContext,
+		List<ContextLine> NextContext,
 		List<Chunk> SectionChunks,
 		int EndIndex,
 		bool Eof
@@ -71,26 +97,24 @@ public static class DiffApplier
 		int Fuzz
 	);
 
-	// ---------- Public API ----------
-
 	public static string ApplyDiff(string input, string diff, ApplyDiffMode mode = ApplyDiffMode.Default)
 	{
+		var newline = DetectNewline(input, diff, mode);
 		var diffLines = NormalizeDiffLines(diff);
 
 		if (mode == ApplyDiffMode.Create)
-			return ParseCreateDiff(diffLines);
+			return ParseCreateDiff(diffLines, newline);
 
-		var parsed = ParseUpdateDiff(diffLines, input);
-		return ApplyChunks(input, parsed.Chunks);
+		var normalizedInput = NormalizeTextNewlines(input);
+		var parsed = ParseUpdateDiff(diffLines, normalizedInput);
+		return ApplyChunks(normalizedInput, parsed.Chunks, newline);
 	}
-
-	// ---------- Parsing helpers ----------
 
 	internal static List<string> NormalizeDiffLines(string diff)
 	{
 		var lines = Regex.Split(diff, "\r?\n")
-						 .Select(l => l.TrimEnd('\r'))
-						 .ToList();
+			.Select(l => l.TrimEnd('\r'))
+			.ToList();
 
 		if (lines.Count > 0 && lines[lines.Count - 1] == "")
 			lines.RemoveAt(lines.Count - 1);
@@ -98,35 +122,49 @@ public static class DiffApplier
 		return lines;
 	}
 
+	internal static string DetectNewlineFromText(string text)
+	{
+		return text.IndexOf("\r\n", StringComparison.Ordinal) >= 0 ? "\r\n" : "\n";
+	}
+
+	internal static string DetectNewline(string input, string diff, ApplyDiffMode mode)
+	{
+		// Create-file diffs don't have an input to infer newline style from.
+		// Use the diff's newline style if present, otherwise default to LF.
+		if (mode != ApplyDiffMode.Create && input.IndexOf('\n') >= 0)
+			return DetectNewlineFromText(input);
+
+		return DetectNewlineFromText(diff);
+	}
+
+	internal static string NormalizeTextNewlines(string text)
+	{
+		// Normalize CRLF to LF for parsing/matching. Newline style is restored when emitting.
+		return text.Replace("\r\n", "\n");
+	}
+
 	internal static bool IsDone(ParserState state, IReadOnlyList<string> prefixes)
 	{
 		if (state.Index >= state.Lines.Count)
 			return true;
 
-		return prefixes.Any(p => state.Lines[state.Index].StartsWith(p));
+		return prefixes.Any(p => state.Lines[state.Index].StartsWith(p, StringComparison.Ordinal));
 	}
 
-	internal static string ReadStr(ParserState state, string prefix)
-	{
-		if (state.Index >= state.Lines.Count)
-			return "";
-
-		var current = state.Lines[state.Index];
-		if (current.StartsWith(prefix))
-		{
-			state.Index++;
-			return current.Substring(prefix.Length);
-		}
-
-		return "";
-	}
-
-	// ---------- Create diff ----------
-
-	internal static string ParseCreateDiff(List<string> lines)
+	internal static string ParseCreateDiff(List<string> lines, string newline)
 	{
 		var parser = new ParserState(lines.Concat(new[] { END_PATCH }).ToList());
 		var output = new List<string>();
+
+		if (parser.Index < parser.Lines.Count)
+		{
+			var firstLine = parser.Lines[parser.Index];
+			if (firstLine.StartsWith("*** Add File:", StringComparison.Ordinal) ||
+				firstLine.StartsWith("*** Set File:", StringComparison.Ordinal))
+			{
+				parser.Index++;
+			}
+		}
 
 		while (!IsDone(parser, SECTION_TERMINATORS))
 		{
@@ -134,16 +172,61 @@ public static class DiffApplier
 				break;
 
 			var line = parser.Lines[parser.Index++];
-			if (!line.StartsWith("+"))
-				throw new InvalidOperationException($"Invalid Add File Line: {line}");
+			if (!line.StartsWith("+", StringComparison.Ordinal))
+				throw new InvalidOperationException("Invalid Add File Line: " + line);
 
 			output.Add(line.Substring(1));
 		}
 
-		return string.Join("\n", output);
+		return string.Join(newline, output);
 	}
 
-	// ---------- Update diff ----------
+	internal enum AnchorMatchKind
+	{
+		Literal,
+		StartsWith,
+		EndsWith
+	}
+
+	internal sealed record ParsedAnchor(
+		bool IsBare,
+		AnchorMatchKind Kind,
+		string Text
+	);
+
+	internal static ParsedAnchor? TryReadAnchor(ParserState state)
+	{
+		if (state.Index >= state.Lines.Count)
+			return null;
+
+		var line = state.Lines[state.Index];
+
+		if (line == "@@")
+		{
+			state.Index++;
+			return new ParsedAnchor(true, AnchorMatchKind.Literal, "");
+		}
+
+		if (line.StartsWith("@@^", StringComparison.Ordinal))
+		{
+			state.Index++;
+			return new ParsedAnchor(false, AnchorMatchKind.StartsWith, line.Substring(3));
+		}
+
+		if (line.StartsWith("@@$", StringComparison.Ordinal))
+		{
+			state.Index++;
+			return new ParsedAnchor(false, AnchorMatchKind.EndsWith, line.Substring(3));
+		}
+
+		if (line.StartsWith("@@ ", StringComparison.Ordinal))
+		{
+			state.Index++;
+			return new ParsedAnchor(false, AnchorMatchKind.Literal, line.Substring(3));
+		}
+
+		return null;
+	}
 
 	internal static ParsedUpdateDiff ParseUpdateDiff(List<string> lines, string input)
 	{
@@ -154,36 +237,35 @@ public static class DiffApplier
 
 		while (!IsDone(parser, END_SECTION_MARKERS))
 		{
-			var anchor = ReadStr(parser, "@@ ");
-			bool hasBareAnchor =
-				anchor == "" &&
-				parser.Index < parser.Lines.Count &&
-				parser.Lines[parser.Index] == "@@";
+			var parsedAnchor = TryReadAnchor(parser);
 
-			if (hasBareAnchor)
-				parser.Index++;
-
-			if (!(anchor.Length > 0 || hasBareAnchor || cursor == 0))
+			if (!(parsedAnchor != null || cursor == 0))
 			{
 				var currentLine = parser.Index < parser.Lines.Count
 					? parser.Lines[parser.Index]
 					: "";
-				throw new InvalidOperationException($"Invalid Line:\n{currentLine}");
+				throw new InvalidOperationException("Invalid Line:\n" + currentLine);
 			}
 
-			if (anchor.Trim().Length > 0)
+			if (parsedAnchor is { IsBare: false } anchor && anchor.Text.Trim().Length > 0)
 				cursor = AdvanceCursorToAnchor(anchor, inputLines, cursor, parser);
 
-			var section = ReadSection(parser.Lines, parser.Index);
-			var findResult = FindContext(inputLines, section.NextContext, cursor, section.Eof);
+			ReadSectionResult section = ReadSection(parser.Lines, parser.Index);
+			ContextMatch findResult = FindContext(inputLines, section.NextContext, cursor, section.Eof);
 
 			if (findResult.NewIndex == -1)
 			{
-				var ctxText = string.Join("\n", section.NextContext);
+				var ctxText = string.Join("\n", section.NextContext.Select(c =>
+					c.Kind switch {
+						ContextMatchKind.Exact => c.Text,
+						ContextMatchKind.StartsWith => "^" + c.Text,
+						ContextMatchKind.EndsWith => "$" + c.Text,
+						_ => c.Text
+					}));
 				if (section.Eof)
-					throw new InvalidOperationException($"Invalid EOF Context {cursor}:\n{ctxText}");
+					throw new InvalidOperationException("Invalid EOF Context " + cursor + ":\n" + ctxText);
 
-				throw new InvalidOperationException($"Invalid Context {cursor}:\n{ctxText}");
+				throw new InvalidOperationException("Invalid Context " + cursor + ":\n" + ctxText);
 			}
 
 			cursor = findResult.NewIndex + section.NextContext.Count;
@@ -203,19 +285,38 @@ public static class DiffApplier
 		return new ParsedUpdateDiff(chunks, parser.Fuzz);
 	}
 
+	internal static bool MatchesAnchor(
+	string sourceLine,
+	ParsedAnchor anchor,
+	Func<string, string> mapFn)
+	{
+		var source = mapFn(sourceLine);
+		var target = mapFn(anchor.Text);
+
+		return anchor.Kind switch {
+			AnchorMatchKind.Literal => source == target,
+			AnchorMatchKind.StartsWith => source.StartsWith(target, StringComparison.Ordinal),
+			AnchorMatchKind.EndsWith => source.EndsWith(target, StringComparison.Ordinal),
+			_ => false
+		};
+	}
+
 	internal static int AdvanceCursorToAnchor(
-		string anchor,
+		ParsedAnchor anchor,
 		List<string> inputLines,
 		int cursor,
 		ParserState parser)
 	{
 		bool found = false;
 
-		if (!inputLines.Take(cursor).Any(l => l == anchor))
+		bool SeenBefore(Func<string, string> mapFn) =>
+			inputLines.Take(cursor).Any(l => MatchesAnchor(l, anchor, mapFn));
+
+		if (!SeenBefore(v => v))
 		{
 			for (int i = cursor; i < inputLines.Count; i++)
 			{
-				if (inputLines[i] == anchor)
+				if (MatchesAnchor(inputLines[i], anchor, v => v))
 				{
 					cursor = i + 1;
 					found = true;
@@ -224,11 +325,11 @@ public static class DiffApplier
 			}
 		}
 
-		if (!found && !inputLines.Take(cursor).Any(l => l.Trim() == anchor.Trim()))
+		if (!found && !SeenBefore(v => v.TrimEnd()))
 		{
 			for (int i = cursor; i < inputLines.Count; i++)
 			{
-				if (inputLines[i].Trim() == anchor.Trim())
+				if (MatchesAnchor(inputLines[i], anchor, v => v.TrimEnd()))
 				{
 					cursor = i + 1;
 					parser.Fuzz += 1;
@@ -238,17 +339,40 @@ public static class DiffApplier
 			}
 		}
 
+		if (!found && !SeenBefore(v => v.Trim()))
+		{
+			for (int i = cursor; i < inputLines.Count; i++)
+			{
+				if (MatchesAnchor(inputLines[i], anchor, v => v.Trim()))
+				{
+					cursor = i + 1;
+					parser.Fuzz += 100;
+					found = true;
+					break;
+				}
+			}
+		}
+
 		return cursor;
 	}
 
-	// ---------- Section parsing ----------
+	internal static ContextLine ParseContextLine(char prefix, string lineContent)
+	{
+		if (prefix == '^')
+			return new ContextLine(ContextMatchKind.StartsWith, lineContent);
+
+		if (prefix == '$')
+			return new ContextLine(ContextMatchKind.EndsWith, lineContent);
+
+		return new ContextLine(ContextMatchKind.Exact, lineContent);
+	}
 
 	internal static ReadSectionResult ReadSection(List<string> lines, int startIndex)
 	{
-		var context = new List<string>();
-		var delLines = new List<string>();
-		var insLines = new List<string>();
-		var sectionChunks = new List<Chunk>();
+		List<ContextLine> context = [];
+		List<string> delLines = [];
+		List<string> insLines = [];
+		List<Chunk> sectionChunks = [];
 
 		string mode = "keep";
 		int index = startIndex;
@@ -258,19 +382,22 @@ public static class DiffApplier
 		{
 			var raw = lines[index];
 
-			if (raw.StartsWith("@@") ||
-				raw.StartsWith(END_PATCH) ||
-				raw.StartsWith("*** Update File:") ||
-				raw.StartsWith("*** Delete File:") ||
-				raw.StartsWith("*** Add File:") ||
-				raw.StartsWith(END_FILE))
+			if (raw.StartsWith("@@", StringComparison.Ordinal) ||
+				raw.StartsWith(END_PATCH, StringComparison.Ordinal) ||
+				raw.StartsWith("*** Update File:", StringComparison.Ordinal) ||
+				raw.StartsWith("*** Delete File:", StringComparison.Ordinal) ||
+				raw.StartsWith("*** Add File:", StringComparison.Ordinal) ||
+				raw.StartsWith("*** Set File:", StringComparison.Ordinal) ||
+				raw.StartsWith(END_FILE, StringComparison.Ordinal))
+			{
 				break;
+			}
 
 			if (raw == "***")
 				break;
 
-			if (raw.StartsWith("***"))
-				throw new InvalidOperationException($"Invalid Line: {raw}");
+			if (raw.StartsWith("***", StringComparison.Ordinal))
+				throw new InvalidOperationException("Invalid Line: " + raw);
 
 			index++;
 			var lastMode = mode;
@@ -278,14 +405,32 @@ public static class DiffApplier
 			var line = raw.Length > 0 ? raw : " ";
 			char prefix = line[0];
 
-			mode = prefix switch {
-				'+' => "add",
-				'-' => "delete",
-				' ' => "keep",
-				_ => throw new InvalidOperationException($"Invalid Line: {line}")
+			switch (prefix)
+			{
+				case '+':
+					mode = "add";
+					break;
+				case '-':
+					mode = "delete";
+					break;
+				case ' ':
+				case '^':
+				case '$':
+					mode = "keep";
+					break;
+				default:
+					throw new InvalidOperationException("Invalid Line: " + line);
+			}
+
+			string lineContent = prefix switch {
+				' ' => line.Substring(1),
+				'^' => line.Substring(1),
+				'$' => line.Substring(1),
+				'+' => line.Substring(1),
+				'-' => line.Substring(1),
+				_ => throw new InvalidOperationException("Invalid Line: " + line)
 			};
 
-			var content = line.Substring(1);
 			bool switchingToContext = mode == "keep" && lastMode != mode;
 
 			if (switchingToContext && (delLines.Count > 0 || insLines.Count > 0))
@@ -301,16 +446,16 @@ public static class DiffApplier
 
 			if (mode == "delete")
 			{
-				delLines.Add(content);
-				context.Add(content);
+				delLines.Add(lineContent);
+				context.Add(new ContextLine(ContextMatchKind.Exact, lineContent));
 			}
 			else if (mode == "add")
 			{
-				insLines.Add(content);
+				insLines.Add(lineContent);
 			}
 			else
 			{
-				context.Add(content);
+				context.Add(ParseContextLine(prefix, lineContent));
 			}
 		}
 
@@ -329,17 +474,15 @@ public static class DiffApplier
 		if (index == origIndex)
 		{
 			var nextLine = index < lines.Count ? lines[index] : "";
-			throw new InvalidOperationException($"Nothing in this section - index={index} {nextLine}");
+			throw new InvalidOperationException("Nothing in this section - index=" + index + " " + nextLine);
 		}
 
 		return new ReadSectionResult(context, sectionChunks, index, false);
 	}
 
-	// ---------- Context matching ----------
-
 	internal static ContextMatch FindContext(
 		List<string> lines,
-		List<string> context,
+		List<ContextLine> context,
 		int start,
 		bool eof)
 	{
@@ -359,48 +502,63 @@ public static class DiffApplier
 
 	internal static ContextMatch FindContextCore(
 		List<string> lines,
-		List<string> context,
+		List<ContextLine> context,
 		int start)
 	{
 		if (context.Count == 0)
 			return new ContextMatch(start, 0);
 
 		for (int i = start; i < lines.Count; i++)
+		{
 			if (EqualsSlice(lines, context, i, v => v))
 				return new ContextMatch(i, 0);
+		}
 
 		for (int i = start; i < lines.Count; i++)
+		{
 			if (EqualsSlice(lines, context, i, v => v.TrimEnd()))
 				return new ContextMatch(i, 1);
+		}
 
 		for (int i = start; i < lines.Count; i++)
+		{
 			if (EqualsSlice(lines, context, i, v => v.Trim()))
 				return new ContextMatch(i, 100);
+		}
 
 		return new ContextMatch(-1, 0);
 	}
 
 	internal static bool EqualsSlice(
-		List<string> source,
-		List<string> target,
-		int start,
-		Func<string, string> mapFn)
+	List<string> source,
+	List<ContextLine> target,
+	int start,
+	Func<string, string> mapFn)
 	{
 		if (start + target.Count > source.Count)
 			return false;
 
 		for (int offset = 0; offset < target.Count; offset++)
 		{
-			if (mapFn(source[start + offset]) != mapFn(target[offset]))
+			var sourceLine = mapFn(source[start + offset]);
+			var targetLine = target[offset];
+			var targetText = mapFn(targetLine.Text);
+
+			bool matched = targetLine.Kind switch {
+				ContextMatchKind.Exact => sourceLine == targetText,
+				ContextMatchKind.StartsWith => sourceLine.StartsWith(targetText, StringComparison.Ordinal),
+				ContextMatchKind.EndsWith => sourceLine.EndsWith(targetText, StringComparison.Ordinal),
+				_ => false
+			};
+
+			if (!matched)
 				return false;
 		}
 
 		return true;
 	}
 
-	// ---------- Apply chunks ----------
-
-	internal static string ApplyChunks(string input, List<Chunk> chunks)
+	internal static string ApplyChunks(string input, List<Chunk> chunks, string newline)
 	{
 		var origLines = input.Split('\n').ToList();
 		var destLines = new List<string>();
@@ -409,12 +567,16 @@ public static class DiffApplier
 		foreach (var chunk in chunks)
 		{
 			if (chunk.OrigIndex > origLines.Count)
+			{
 				throw new InvalidOperationException(
-					$"applyDiff: chunk.origIndex {chunk.OrigIndex} > input length {origLines.Count}");
+					"applyDiff: chunk.origIndex " + chunk.OrigIndex + " > input length " + origLines.Count);
+			}
 
 			if (cursor > chunk.OrigIndex)
+			{
 				throw new InvalidOperationException(
-					$"applyDiff: overlapping chunk at {chunk.OrigIndex} (cursor {cursor})");
+					"applyDiff: overlapping chunk at " + chunk.OrigIndex + " (cursor " + cursor + ")");
+			}
 
 			destLines.AddRange(origLines.GetRange(cursor, chunk.OrigIndex - cursor));
 			cursor = chunk.OrigIndex;
@@ -426,6 +588,6 @@ public static class DiffApplier
 		}
 
 		destLines.AddRange(origLines.Skip(cursor));
-		return string.Join("\n", destLines);
+		return string.Join(newline, destLines);
 	}
 }
