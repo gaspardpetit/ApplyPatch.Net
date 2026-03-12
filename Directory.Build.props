@@ -16,7 +16,7 @@
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Version)' == ''">
-    <Version>1.1.0-local</Version>
+    <Version>1.1.1-local</Version>
   </PropertyGroup>
 
   <ItemGroup Condition="'$(IsPackable)' != 'false'">
